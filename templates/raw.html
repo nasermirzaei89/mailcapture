@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Raw {{.Message.ID}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+  <main class="container">
+    <p><a href="/">Back to inbox</a> | <a href="/messages/{{.Message.ID}}">Back to message</a></p>
+    <h1>Raw source</h1>
+    <pre>{{.Message.Raw}}</pre>
+  </main>
+</body>
+
+</html>

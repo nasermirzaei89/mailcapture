@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MailCapture</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+  <main class="container">
+    <header>
+      <h1>MailCapture</h1>
+    </header>
+
+    {{if .Messages}}
+    <table>
+      <thead>
+        <tr>
+          <th>Received (UTC)</th>
+          <th>Envelope From</th>
+          <th>Recipients</th>
+          <th>Subject</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Messages}}
+        <tr>
+          <td>{{.ReceivedAt.Format "2006-01-02 15:04:05"}}</td>
+          <td>{{if .EnvelopeFrom}}{{.EnvelopeFrom}}{{else}}&lt;&gt;{{end}}</td>
+          <td>{{len .EnvelopeTo}}</td>
+          <td><a href="/messages/{{.ID}}">{{if .Subject}}{{.Subject}}{{else}}(no subject){{end}}</a></td>
+        </tr>
+        {{end}}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="4">Total: {{.Count}} email{{if gt .Count 1}}s{{end}}</td>
+        </tr>
+      </tfoot>
+    </table>
+    {{else}}
+    <p>No emails received yet.</p>
+    {{end}}
+  </main>
+</body>
+
+</html>
