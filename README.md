@@ -42,7 +42,7 @@ Once your app sends an email, it will appear in the inbox.
 If you want to test immediately from terminal:
 
 ```bash
-nc localhost 1025
+nc -C localhost 1025 <<'EOF'
 HELO localhost
 MAIL FROM:<from@example.com>
 RCPT TO:<to@example.com>
@@ -54,6 +54,7 @@ To: to@example.com
 Hello from MailCapture test.
 .
 QUIT
+EOF
 ```
 
 Refresh `http://localhost:8080` and you should see the message.
