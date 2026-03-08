@@ -3,10 +3,19 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
 	"log/slog"
+	"math/big"
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSessionAcceptsMessageAndStoresIt(t *testing.T) {
@@ -231,6 +240,218 @@ func TestSessionEHLOAdvertisesUnlimitedSize(t *testing.T) {
 	}
 }
 
+func TestSessionEHLOAdvertisesSTARTTLSAndHidesAUTHUntilTLS(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.TLSConfig = newTestTLSConfig(t)
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+
+	lines := readMultilineResponse(t, r, "250")
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "STARTTLS") {
+		t.Fatalf("expected STARTTLS capability in %q", joined)
+	}
+	if strings.Contains(joined, "AUTH ") {
+		t.Fatalf("did not expect AUTH capability before TLS in %q", joined)
+	}
+}
+
+func TestSessionAUTHPlainSuccessAndStoreMessage(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	cfg.RequireAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00user\x00pass"))
+	writeLine(t, w, "AUTH PLAIN "+authPayload)
+	readHasCode(t, r, "235")
+
+	writeLine(t, w, "MAIL FROM:<from@example.com>")
+	readHasCode(t, r, "250")
+	writeLine(t, w, "RCPT TO:<to@example.com>")
+	readHasCode(t, r, "250")
+	writeLine(t, w, "DATA")
+	readHasCode(t, r, "354")
+	writeRaw(t, w, "Subject: Auth Test\r\n\r\nhello\r\n.\r\n")
+	readHasCode(t, r, "250")
+
+	count, err := repo.Count(context.Background())
+	if err != nil {
+		t.Fatalf("count failed: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count mismatch: got %d want 1", count)
+	}
+}
+
+func TestSessionAUTHLoginSuccess(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	writeLine(t, w, "AUTH LOGIN")
+	readHasCode(t, r, "334")
+	writeLine(t, w, base64.StdEncoding.EncodeToString([]byte("user")))
+	readHasCode(t, r, "334")
+	writeLine(t, w, base64.StdEncoding.EncodeToString([]byte("pass")))
+	readHasCode(t, r, "235")
+}
+
+func TestSessionRejectsMAILWhenAuthRequired(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	cfg.RequireAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	writeLine(t, w, "MAIL FROM:<from@example.com>")
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "530") {
+		t.Fatalf("expected 530 before AUTH, got %q", resp)
+	}
+}
+
+func TestSessionRejectsAUTHWithoutTLSWhenInsecureDisabled(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.TLSConfig = newTestTLSConfig(t)
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00user\x00pass"))
+	writeLine(t, w, "AUTH PLAIN "+authPayload)
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "538") {
+		t.Fatalf("expected 538 for AUTH without TLS, got %q", resp)
+	}
+}
+
+func TestSessionSTARTTLSUpgradeRequiresNewEHLO(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.TLSConfig = newTestTLSConfig(t)
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	beforeTLS := strings.Join(readMultilineResponse(t, r, "250"), "\n")
+	if !strings.Contains(beforeTLS, "STARTTLS") {
+		t.Fatalf("expected STARTTLS capability before upgrade in %q", beforeTLS)
+	}
+
+	writeLine(t, w, "STARTTLS")
+	readHasCode(t, r, "220")
+
+	tlsClient := tls.Client(client, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("tls handshake failed: %v", err)
+	}
+
+	tr := bufio.NewReader(tlsClient)
+	tw := bufio.NewWriter(tlsClient)
+
+	writeLine(t, tw, "MAIL FROM:<from@example.com>")
+	resp := readLine(t, tr)
+	if !strings.HasPrefix(resp, "503") {
+		t.Fatalf("expected 503 before post-TLS EHLO, got %q", resp)
+	}
+
+	writeLine(t, tw, "EHLO localhost")
+	afterTLS := strings.Join(readMultilineResponse(t, tr, "250"), "\n")
+	if strings.Contains(afterTLS, "STARTTLS") {
+		t.Fatalf("did not expect STARTTLS after TLS upgrade in %q", afterTLS)
+	}
+	if !strings.Contains(afterTLS, "AUTH PLAIN LOGIN") {
+		t.Fatalf("expected AUTH capability after TLS upgrade in %q", afterTLS)
+	}
+}
+
 func readHasCode(t *testing.T, r *bufio.Reader, code string) {
 	t.Helper()
 
@@ -292,5 +513,50 @@ func writeRaw(t *testing.T, w *bufio.Writer, data string) {
 	err = w.Flush()
 	if err != nil {
 		t.Fatalf("flush failed: %v", err)
+	}
+}
+
+func newTestTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key failed: %v", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		t.Fatalf("generate serial number failed: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: "localhost",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		DNSNames:              []string{"localhost"},
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate failed: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("load x509 key pair failed: %v", err)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -15,30 +17,47 @@ import (
 var errMessageTooLarge = errors.New("message too large")
 
 type session struct {
-	conn            net.Conn
-	repo            MessageRepository
-	logger          *slog.Logger
-	reader          *bufio.Reader
-	writer          *bufio.Writer
-	remote          string
-	greeted         bool
-	hasMailFrom     bool
-	mailFrom        string
-	rcptTo          []string
-	maxMessageBytes int
-	maxRecipients   int
+	conn              net.Conn
+	repo              MessageRepository
+	logger            *slog.Logger
+	reader            *bufio.Reader
+	writer            *bufio.Writer
+	remote            string
+	greeted           bool
+	hasMailFrom       bool
+	mailFrom          string
+	rcptTo            []string
+	maxMessageBytes   int
+	maxRecipients     int
+	tlsConfig         *tls.Config
+	tlsActive         bool
+	authUsername      string
+	authPassword      string
+	allowInsecureAuth bool
+	requireAuth       bool
+	authenticated     bool
 }
 
 func newSession(conn net.Conn, repo MessageRepository, logger *slog.Logger, config SMTPConfig) *session {
+	var tlsConfig *tls.Config
+	if config.TLSConfig != nil {
+		tlsConfig = config.TLSConfig.Clone()
+	}
+
 	return &session{
-		conn:            conn,
-		repo:            repo,
-		logger:          logger,
-		reader:          bufio.NewReader(conn),
-		writer:          bufio.NewWriter(conn),
-		remote:          conn.RemoteAddr().String(),
-		maxMessageBytes: config.MaxMessageBytes,
-		maxRecipients:   config.MaxRecipients,
+		conn:              conn,
+		repo:              repo,
+		logger:            logger,
+		reader:            bufio.NewReader(conn),
+		writer:            bufio.NewWriter(conn),
+		remote:            conn.RemoteAddr().String(),
+		maxMessageBytes:   config.MaxMessageBytes,
+		maxRecipients:     config.MaxRecipients,
+		tlsConfig:         tlsConfig,
+		authUsername:      config.AuthUsername,
+		authPassword:      config.AuthPassword,
+		allowInsecureAuth: config.AllowInsecureAuth,
+		requireAuth:       config.RequireAuth,
 	}
 }
 
@@ -106,6 +125,108 @@ func (s *session) run(ctx context.Context) {
 			if err != nil {
 				return
 			}
+		case "STARTTLS":
+			if s.tlsConfig == nil {
+				err := s.writeResponse(502, "command not implemented")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if s.tlsActive {
+				err := s.writeResponse(503, "already using TLS")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if !s.greeted {
+				err := s.writeResponse(503, "send EHLO/HELO first")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			err := s.writeResponse(220, "ready to start TLS")
+			if err != nil {
+				return
+			}
+
+			tlsConn := tls.Server(s.conn, s.tlsConfig.Clone())
+			if handshakeErr := tlsConn.Handshake(); handshakeErr != nil {
+				s.logger.Error("smtp: starttls handshake failed", "remote", s.remote, "error", handshakeErr)
+				return
+			}
+
+			s.conn = tlsConn
+			s.reader = bufio.NewReader(tlsConn)
+			s.writer = bufio.NewWriter(tlsConn)
+			s.tlsActive = true
+			s.greeted = false
+			s.authenticated = false
+			s.resetTransaction()
+		case "AUTH":
+			if !s.greeted {
+				err := s.writeResponse(503, "send EHLO/HELO first")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if !s.authEnabled() {
+				err := s.writeResponse(502, "command not implemented")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if !s.authPermittedOnConnection() {
+				err := s.writeResponse(538, "encryption required for requested authentication mechanism")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if s.authenticated {
+				err := s.writeResponse(503, "already authenticated")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			username, password, authErr := s.readAuthCredentials(arg)
+			if authErr != nil {
+				err := s.writeResponse(501, authErr.Error())
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			if username != s.authUsername || password != s.authPassword {
+				err := s.writeResponse(535, "authentication credentials invalid")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			s.authenticated = true
+			err = s.writeResponse(235, "2.7.0 authentication successful")
+			if err != nil {
+				return
+			}
 		case "NOOP":
 			err := s.writeResponse(250, "ok")
 			if err != nil {
@@ -123,6 +244,14 @@ func (s *session) run(ctx context.Context) {
 		case "MAIL":
 			if !s.greeted {
 				err := s.writeResponse(503, "send HELO/EHLO first")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+			if s.requireAuth && s.authEnabled() && !s.authenticated {
+				err := s.writeResponse(530, "authentication required")
 				if err != nil {
 					return
 				}
@@ -342,12 +471,130 @@ func (s *session) ehloResponseLines(clientName string) []string {
 		"8BITMIME",
 	}
 
+	if s.tlsConfig != nil && !s.tlsActive {
+		lines = append(lines, "STARTTLS")
+	}
+	if s.authAdvertised() {
+		lines = append(lines, "AUTH PLAIN LOGIN")
+	}
+
 	sizeLine := "SIZE"
 	if s.maxMessageBytes > 0 {
 		sizeLine = fmt.Sprintf("SIZE %d", s.maxMessageBytes)
 	}
 
 	return append(lines, sizeLine)
+}
+
+func (s *session) authEnabled() bool {
+	return s.authUsername != "" && s.authPassword != ""
+}
+
+func (s *session) authPermittedOnConnection() bool {
+	return s.tlsActive || s.allowInsecureAuth
+}
+
+func (s *session) authAdvertised() bool {
+	return s.authEnabled() && s.authPermittedOnConnection()
+}
+
+func (s *session) readAuthCredentials(arg string) (string, string, error) {
+	fields := strings.Fields(strings.TrimSpace(arg))
+	if len(fields) == 0 {
+		return "", "", fmt.Errorf("missing auth mechanism")
+	}
+
+	mechanism := strings.ToUpper(fields[0])
+	initialResponse := ""
+	if len(fields) > 1 {
+		initialResponse = fields[1]
+	}
+
+	switch mechanism {
+	case "PLAIN":
+		return s.readAuthPlainCredentials(initialResponse)
+	case "LOGIN":
+		return s.readAuthLoginCredentials(initialResponse)
+	default:
+		return "", "", fmt.Errorf("unsupported auth mechanism")
+	}
+}
+
+func (s *session) readAuthPlainCredentials(initialResponse string) (string, string, error) {
+	response := strings.TrimSpace(initialResponse)
+	if response == "" {
+		if err := s.writeResponse(334, ""); err != nil {
+			return "", "", err
+		}
+
+		line, err := s.readLine()
+		if err != nil {
+			return "", "", err
+		}
+		response = strings.TrimSpace(line)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(response)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid base64 auth data")
+	}
+
+	parts := bytes.Split(decoded, []byte{0})
+	if len(parts) >= 3 {
+		return string(parts[len(parts)-2]), string(parts[len(parts)-1]), nil
+	}
+	if len(parts) == 2 {
+		return string(parts[0]), string(parts[1]), nil
+	}
+
+	return "", "", fmt.Errorf("invalid auth data")
+}
+
+func (s *session) readAuthLoginCredentials(initialResponse string) (string, string, error) {
+	username := ""
+	password := ""
+
+	response := strings.TrimSpace(initialResponse)
+	if response == "" {
+		var err error
+		username, err = s.promptAndReadBase64("Username:")
+		if err != nil {
+			return "", "", err
+		}
+	} else {
+		decoded, err := base64.StdEncoding.DecodeString(response)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid base64 auth data")
+		}
+		username = string(decoded)
+	}
+
+	var err error
+	password, err = s.promptAndReadBase64("Password:")
+	if err != nil {
+		return "", "", err
+	}
+
+	return username, password, nil
+}
+
+func (s *session) promptAndReadBase64(prompt string) (string, error) {
+	challenge := base64.StdEncoding.EncodeToString([]byte(prompt))
+	if err := s.writeResponse(334, challenge); err != nil {
+		return "", err
+	}
+
+	line, err := s.readLine()
+	if err != nil {
+		return "", err
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(line))
+	if err != nil {
+		return "", fmt.Errorf("invalid base64 auth data")
+	}
+
+	return string(decoded), nil
 }
 
 func splitCommand(line string) (string, string) {

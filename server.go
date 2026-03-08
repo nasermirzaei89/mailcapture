@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,8 +23,13 @@ type SMTPServer struct {
 }
 
 type SMTPConfig struct {
-	MaxMessageBytes int
-	MaxRecipients   int
+	MaxMessageBytes   int
+	MaxRecipients     int
+	TLSConfig         *tls.Config
+	AuthUsername      string
+	AuthPassword      string
+	AllowInsecureAuth bool
+	RequireAuth       bool
 }
 
 func DefaultSMTPConfig() SMTPConfig {
@@ -43,6 +49,12 @@ func NewSMTPServerWithConfig(addr string, repo MessageRepository, logger *slog.L
 	}
 	if config.MaxMessageBytes < 0 {
 		config.MaxMessageBytes = 0
+	}
+	if config.AuthUsername == "" || config.AuthPassword == "" {
+		config.AuthUsername = ""
+		config.AuthPassword = ""
+		config.AllowInsecureAuth = false
+		config.RequireAuth = false
 	}
 
 	return &SMTPServer{addr: addr, repo: repo, logger: logger, config: config}

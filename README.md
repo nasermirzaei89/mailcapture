@@ -49,6 +49,17 @@ MailCapture now supports practical in-memory and SMTP limits:
 
 Set any of these to `0` to disable the specific limit.
 
+## STARTTLS and AUTH
+
+MailCapture can optionally support TLS upgrade and SMTP authentication:
+
+- `--smtp-tls-cert-file` + `--smtp-tls-key-file` enable `STARTTLS`
+- `--smtp-auth-username` + `--smtp-auth-password` enable `AUTH PLAIN` and `AUTH LOGIN`
+- `--require-auth` requires successful `AUTH` before `MAIL FROM`
+- `--allow-insecure-auth` allows AUTH before TLS (development only)
+
+When TLS is enabled and insecure auth is not allowed, `AUTH` is advertised after `STARTTLS`.
+
 ## HTTP API
 
 In addition to the HTML UI, these endpoints are available:
