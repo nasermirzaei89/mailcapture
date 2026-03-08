@@ -168,6 +168,69 @@ func TestSessionRejectsOversizedData(t *testing.T) {
 	}
 }
 
+func TestSessionEHLOAdvertisesCapabilities(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.MaxMessageBytes = 2048
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+
+	lines := readMultilineResponse(t, r, "250")
+	if len(lines) < 4 {
+		t.Fatalf("expected multiline EHLO response with capabilities, got %v", lines)
+	}
+
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "PIPELINING") {
+		t.Fatalf("expected PIPELINING capability in %q", joined)
+	}
+	if !strings.Contains(joined, "8BITMIME") {
+		t.Fatalf("expected 8BITMIME capability in %q", joined)
+	}
+	if !strings.Contains(joined, "SIZE 2048") {
+		t.Fatalf("expected SIZE 2048 capability in %q", joined)
+	}
+}
+
+func TestSessionEHLOAdvertisesUnlimitedSize(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.MaxMessageBytes = 0
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+
+	lines := readMultilineResponse(t, r, "250")
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "SIZE") {
+		t.Fatalf("expected SIZE capability in %q", joined)
+	}
+	if strings.Contains(joined, "SIZE 0") {
+		t.Fatalf("did not expect SIZE 0 capability in %q", joined)
+	}
+}
+
 func readHasCode(t *testing.T, r *bufio.Reader, code string) {
 	t.Helper()
 
@@ -175,6 +238,31 @@ func readHasCode(t *testing.T, r *bufio.Reader, code string) {
 	if !strings.HasPrefix(resp, code) {
 		t.Fatalf("expected response %s, got %q", code, resp)
 	}
+}
+
+func readMultilineResponse(t *testing.T, r *bufio.Reader, code string) []string {
+	t.Helper()
+
+	lines := make([]string, 0, 4)
+	for {
+		line := readLine(t, r)
+		if !strings.HasPrefix(line, code) {
+			t.Fatalf("expected response %s, got %q", code, line)
+		}
+		if len(line) < 4 {
+			t.Fatalf("invalid SMTP response line: %q", line)
+		}
+
+		lines = append(lines, line)
+		if line[3] == ' ' {
+			break
+		}
+		if line[3] != '-' {
+			t.Fatalf("invalid SMTP multiline separator in line: %q", line)
+		}
+	}
+
+	return lines
 }
 
 func readLine(t *testing.T, r *bufio.Reader) string {

@@ -73,9 +73,9 @@ func (s *session) run(ctx context.Context) {
 
 		cmd, arg := splitCommand(line)
 		switch cmd {
-		case "HELO", "EHLO":
+		case "HELO":
 			if strings.TrimSpace(arg) == "" {
-				err := s.writeResponse(501, cmd+" requires domain/address")
+				err := s.writeResponse(501, "HELO requires domain/address")
 				if err != nil {
 					return
 				}
@@ -86,6 +86,23 @@ func (s *session) run(ctx context.Context) {
 			s.resetTransaction()
 
 			err := s.writeResponse(250, "hello "+strings.TrimSpace(arg))
+			if err != nil {
+				return
+			}
+		case "EHLO":
+			if strings.TrimSpace(arg) == "" {
+				err := s.writeResponse(501, "EHLO requires domain/address")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
+			s.greeted = true
+			s.resetTransaction()
+
+			err := s.writeResponseLines(250, s.ehloResponseLines(strings.TrimSpace(arg)))
 			if err != nil {
 				return
 			}
@@ -297,6 +314,40 @@ func (s *session) writeResponse(code int, message string) error {
 	}
 
 	return s.writer.Flush()
+}
+
+func (s *session) writeResponseLines(code int, lines []string) error {
+	if len(lines) == 0 {
+		return s.writeResponse(code, "")
+	}
+
+	for i, line := range lines {
+		separator := '-'
+		if i == len(lines)-1 {
+			separator = ' '
+		}
+
+		if _, err := fmt.Fprintf(s.writer, "%d%c%s\r\n", code, separator, line); err != nil {
+			return err
+		}
+	}
+
+	return s.writer.Flush()
+}
+
+func (s *session) ehloResponseLines(clientName string) []string {
+	lines := []string{
+		"mailcapture hello " + clientName,
+		"PIPELINING",
+		"8BITMIME",
+	}
+
+	sizeLine := "SIZE"
+	if s.maxMessageBytes > 0 {
+		sizeLine = fmt.Sprintf("SIZE %d", s.maxMessageBytes)
+	}
+
+	return append(lines, sizeLine)
 }
 
 func splitCommand(line string) (string, string) {
