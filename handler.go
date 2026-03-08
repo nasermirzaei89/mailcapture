@@ -104,15 +104,15 @@ func (s *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	message, found, err := s.repo.GetByID(r.Context(), id)
+	message, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
+		if errors.As(err, &MessageNotFoundError{}) {
+			http.NotFound(w, r)
+			return
+		}
+
 		s.logger.Error("failed to load message", "error", err)
 		http.Error(w, "failed to load message", http.StatusInternalServerError)
-		return
-	}
-
-	if !found {
-		http.NotFound(w, r)
 		return
 	}
 
@@ -127,14 +127,15 @@ func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *WebServer) handleRaw(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	message, found, err := s.repo.GetByID(r.Context(), id)
+	message, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
+		if errors.As(err, &MessageNotFoundError{}) {
+			http.NotFound(w, r)
+			return
+		}
+
 		s.logger.Error("failed to load message", "error", err)
 		http.Error(w, "failed to load message", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		http.NotFound(w, r)
 		return
 	}
 
@@ -179,15 +180,15 @@ func (s *WebServer) handleAPIClearMessages(w http.ResponseWriter, r *http.Reques
 func (s *WebServer) handleAPIGetMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	message, found, err := s.repo.GetByID(r.Context(), id)
+	message, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
+		if errors.As(err, &MessageNotFoundError{}) {
+			http.NotFound(w, r)
+			return
+		}
+
 		s.logger.Error("failed to load message", "id", id, "error", err)
 		http.Error(w, "failed to load message", http.StatusInternalServerError)
-		return
-	}
-
-	if !found {
-		http.NotFound(w, r)
 		return
 	}
 
@@ -197,14 +198,15 @@ func (s *WebServer) handleAPIGetMessage(w http.ResponseWriter, r *http.Request) 
 func (s *WebServer) handleAPIDeleteMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	deleted, err := s.repo.DeleteByID(r.Context(), id)
+	err := s.repo.DeleteByID(r.Context(), id)
 	if err != nil {
+		if errors.As(err, &MessageNotFoundError{}) {
+			http.NotFound(w, r)
+			return
+		}
+
 		s.logger.Error("failed to delete message", "id", id, "error", err)
 		http.Error(w, "failed to delete message", http.StatusInternalServerError)
-		return
-	}
-	if !deleted {
-		http.NotFound(w, r)
 		return
 	}
 

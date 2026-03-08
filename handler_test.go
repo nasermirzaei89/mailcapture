@@ -14,7 +14,7 @@ func TestHandleIndexRendersMessageList(t *testing.T) {
 	t.Parallel()
 
 	repo := NewInMemoryMessageRepository()
-	_, _ = repo.Create(t.Context(), Message{
+	_ = repo.Create(t.Context(), Message{
 		ID:         "msg-1",
 		ReceivedAt: time.Now().UTC(),
 		Subject:    "Hello",
@@ -49,7 +49,7 @@ func TestAPIListAndGetMessage(t *testing.T) {
 
 	repo := NewInMemoryMessageRepository()
 	msg := Message{ID: "msg-1", ReceivedAt: time.Now().UTC(), Subject: "Hello API"}
-	_, _ = repo.Create(t.Context(), msg)
+	_ = repo.Create(t.Context(), msg)
 
 	s, err := NewWebServer(":0", repo, slog.New(slog.DiscardHandler))
 	if err != nil {
@@ -96,8 +96,8 @@ func TestAPIDeleteByIDAndClear(t *testing.T) {
 	t.Parallel()
 
 	repo := NewInMemoryMessageRepository()
-	_, _ = repo.Create(t.Context(), Message{ID: "msg-1", ReceivedAt: time.Now().UTC()})
-	_, _ = repo.Create(t.Context(), Message{ID: "msg-2", ReceivedAt: time.Now().UTC()})
+	_ = repo.Create(t.Context(), Message{ID: "msg-1", ReceivedAt: time.Now().UTC()})
+	_ = repo.Create(t.Context(), Message{ID: "msg-2", ReceivedAt: time.Now().UTC()})
 
 	s, err := NewWebServer(":0", repo, slog.New(slog.DiscardHandler))
 	if err != nil {

@@ -34,10 +34,18 @@ func NewMessageID() (string, error) {
 
 // MessageRepository defines storage operations for received messages.
 type MessageRepository interface {
-	Create(ctx context.Context, message Message) (Message, error)
-	GetByID(ctx context.Context, id string) (Message, bool, error)
-	List(ctx context.Context) ([]Message, error)
-	Count(ctx context.Context) (int, error)
-	DeleteByID(ctx context.Context, id string) (bool, error)
-	DeleteAll(ctx context.Context) error
+	Create(ctx context.Context, message Message) (err error)
+	GetByID(ctx context.Context, id string) (message Message, err error)
+	List(ctx context.Context) (messages []Message, err error)
+	Count(ctx context.Context) (count int, err error)
+	DeleteByID(ctx context.Context, id string) (err error)
+	DeleteAll(ctx context.Context) (err error)
+}
+
+type MessageNotFoundError struct {
+	ID string
+}
+
+func (err MessageNotFoundError) Error() string {
+	return fmt.Sprintf("message with id %q not found", err.ID)
 }

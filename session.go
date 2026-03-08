@@ -351,7 +351,9 @@ func (s *session) run(ctx context.Context) {
 
 				continue
 			}
-			if _, storeErr := s.repo.Create(ctx, message); storeErr != nil {
+
+			storeErr := s.repo.Create(ctx, message)
+			if storeErr != nil {
 				err := s.writeResponse(451, "failed to store message")
 				if err != nil {
 					return
@@ -359,6 +361,7 @@ func (s *session) run(ctx context.Context) {
 
 				continue
 			}
+
 			s.resetTransaction()
 
 			err = s.writeResponse(250, "queued as "+message.ID)

@@ -13,6 +13,8 @@ type InMemoryMessageRepository struct {
 	maxItems int
 }
 
+var _ MessageRepository = (*InMemoryMessageRepository)(nil)
+
 func NewInMemoryMessageRepository() *InMemoryMessageRepository {
 	return NewInMemoryMessageRepositoryWithLimit(0)
 }
@@ -25,7 +27,7 @@ func NewInMemoryMessageRepositoryWithLimit(maxItems int) *InMemoryMessageReposit
 	}
 }
 
-func (r *InMemoryMessageRepository) Create(_ context.Context, message Message) (Message, error) {
+func (r *InMemoryMessageRepository) Create(_ context.Context, message Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -36,18 +38,19 @@ func (r *InMemoryMessageRepository) Create(_ context.Context, message Message) (
 
 	r.messages = append(r.messages, message)
 	r.index[message.ID] = len(r.messages) - 1
-	return message, nil
+	return nil
 }
 
-func (r *InMemoryMessageRepository) GetByID(_ context.Context, id string) (Message, bool, error) {
+func (r *InMemoryMessageRepository) GetByID(_ context.Context, id string) (Message, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	idx, ok := r.index[id]
 	if !ok {
-		return Message{}, false, nil
+		return Message{}, MessageNotFoundError{ID: id}
 	}
-	return r.messages[idx], true, nil
+
+	return r.messages[idx], nil
 }
 
 func (r *InMemoryMessageRepository) List(_ context.Context) ([]Message, error) {
@@ -58,6 +61,7 @@ func (r *InMemoryMessageRepository) List(_ context.Context) ([]Message, error) {
 	for i := len(r.messages) - 1; i >= 0; i-- {
 		out = append(out, r.messages[i])
 	}
+
 	return out, nil
 }
 
@@ -67,19 +71,19 @@ func (r *InMemoryMessageRepository) Count(_ context.Context) (int, error) {
 	return len(r.messages), nil
 }
 
-func (r *InMemoryMessageRepository) DeleteByID(_ context.Context, id string) (bool, error) {
+func (r *InMemoryMessageRepository) DeleteByID(_ context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	idx, ok := r.index[id]
 	if !ok {
-		return false, nil
+		return MessageNotFoundError{ID: id}
 	}
 
 	r.messages = append(r.messages[:idx], r.messages[idx+1:]...)
 	r.rebuildIndex()
 
-	return true, nil
+	return nil
 }
 
 func (r *InMemoryMessageRepository) DeleteAll(_ context.Context) error {
@@ -98,5 +102,3 @@ func (r *InMemoryMessageRepository) rebuildIndex() {
 		r.index[msg.ID] = i
 	}
 }
-
-var _ MessageRepository = (*InMemoryMessageRepository)(nil)

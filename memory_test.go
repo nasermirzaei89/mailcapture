@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -26,7 +27,7 @@ func TestInMemoryMessageRepositoryConcurrentCreateAndList(t *testing.T) {
 				Subject:    fmt.Sprintf("subject-%d", i),
 			}
 
-			_, err := repo.Create(ctx, msg)
+			err := repo.Create(ctx, msg)
 			if err != nil {
 				t.Errorf("create failed: %v", err)
 			}
@@ -57,9 +58,9 @@ func TestInMemoryMessageRepositoryRespectsMaxItems(t *testing.T) {
 	repo := NewInMemoryMessageRepositoryWithLimit(2)
 	ctx := context.Background()
 
-	_, _ = repo.Create(ctx, Message{ID: "id-1", ReceivedAt: time.Now().UTC(), Subject: "one"})
-	_, _ = repo.Create(ctx, Message{ID: "id-2", ReceivedAt: time.Now().UTC(), Subject: "two"})
-	_, _ = repo.Create(ctx, Message{ID: "id-3", ReceivedAt: time.Now().UTC(), Subject: "three"})
+	_ = repo.Create(ctx, Message{ID: "id-1", ReceivedAt: time.Now().UTC(), Subject: "one"})
+	_ = repo.Create(ctx, Message{ID: "id-2", ReceivedAt: time.Now().UTC(), Subject: "two"})
+	_ = repo.Create(ctx, Message{ID: "id-3", ReceivedAt: time.Now().UTC(), Subject: "three"})
 
 	count, err := repo.Count(ctx)
 	if err != nil {
@@ -69,7 +70,8 @@ func TestInMemoryMessageRepositoryRespectsMaxItems(t *testing.T) {
 		t.Fatalf("count mismatch: got %d want 2", count)
 	}
 
-	if _, found, _ := repo.GetByID(ctx, "id-1"); found {
+	_, err = repo.GetByID(ctx, "id-1")
+	if err == nil {
 		t.Fatalf("expected oldest message to be evicted")
 	}
 }
@@ -80,23 +82,17 @@ func TestInMemoryMessageRepositoryDeleteOperations(t *testing.T) {
 	repo := NewInMemoryMessageRepository()
 	ctx := context.Background()
 
-	_, _ = repo.Create(ctx, Message{ID: "id-1", ReceivedAt: time.Now().UTC()})
-	_, _ = repo.Create(ctx, Message{ID: "id-2", ReceivedAt: time.Now().UTC()})
+	_ = repo.Create(ctx, Message{ID: "id-1", ReceivedAt: time.Now().UTC()})
+	_ = repo.Create(ctx, Message{ID: "id-2", ReceivedAt: time.Now().UTC()})
 
-	deleted, err := repo.DeleteByID(ctx, "id-1")
+	err := repo.DeleteByID(ctx, "id-1")
 	if err != nil {
 		t.Fatalf("delete by id failed: %v", err)
 	}
-	if !deleted {
-		t.Fatalf("expected delete by id to return true")
-	}
 
-	deleted, err = repo.DeleteByID(ctx, "does-not-exist")
-	if err != nil {
-		t.Fatalf("delete missing by id failed: %v", err)
-	}
-	if deleted {
-		t.Fatalf("expected delete by id to return false for missing message")
+	err = repo.DeleteByID(ctx, "does-not-exist")
+	if !errors.As(err, &MessageNotFoundError{}) {
+		t.Fatalf("expected MessageNotFoundError, got %v", err)
 	}
 
 	err = repo.DeleteAll(ctx)
