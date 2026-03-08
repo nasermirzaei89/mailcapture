@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -97,8 +98,9 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if serveErr := webServer.Start(); serveErr != nil {
-			errCh <- serveErr
+		err := webServer.Start()
+		if err != nil {
+			errCh <- err
 		}
 	}()
 
@@ -117,18 +119,25 @@ func run() error {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+
 	go func() {
 		defer wg.Done()
-		if shutErr := smtpServer.Shutdown(shutdownCtx); shutErr != nil {
-			logger.Error("smtp shutdown error", "error", shutErr)
+
+		err := smtpServer.Shutdown(shutdownCtx)
+		if err != nil {
+			logger.Error("smtp shutdown error", "error", err)
 		}
 	}()
+
 	go func() {
 		defer wg.Done()
-		if shutErr := webServer.Shutdown(shutdownCtx); shutErr != nil && shutErr != http.ErrServerClosed {
-			logger.Error("http shutdown error", "error", shutErr)
+
+		err := webServer.Shutdown(shutdownCtx)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("http shutdown error", "error", err)
 		}
 	}()
+
 	wg.Wait()
 
 	logger.Info("shutdown complete")

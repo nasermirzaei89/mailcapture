@@ -50,6 +50,7 @@ func NewWebServer(addr string, repo MessageRepository, logger *slog.Logger) (*We
 	}
 
 	s := &WebServer{repo: repo, logger: logger, templates: tpls}
+
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -66,6 +67,7 @@ func NewWebServer(addr string, repo MessageRepository, logger *slog.Logger) (*We
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
 	return s, nil
 }
 
@@ -85,34 +87,40 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 func (s *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	messages, err := s.repo.List(r.Context())
 	if err != nil {
-		http.Error(w, "failed to load messages", http.StatusInternalServerError)
 		s.logger.Error("failed to load messages", "error", err)
+		http.Error(w, "failed to load messages", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if execErr := s.templates.ExecuteTemplate(w, "list.html", listViewData{Messages: messages, Count: len(messages)}); execErr != nil {
-		s.logger.Error("failed to render page", "error", execErr)
+
+	err = s.templates.ExecuteTemplate(w, "list.html", listViewData{Messages: messages, Count: len(messages)})
+	if err != nil {
+		s.logger.Error("failed to render page", "error", err)
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
 	}
 }
 
 func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
 	message, found, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
 		s.logger.Error("failed to load message", "error", err)
 		http.Error(w, "failed to load message", http.StatusInternalServerError)
 		return
 	}
+
 	if !found {
 		http.NotFound(w, r)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if execErr := s.templates.ExecuteTemplate(w, "detail.html", detailViewData{Message: message}); execErr != nil {
-		s.logger.Error("failed to render page", "error", execErr)
+
+	err = s.templates.ExecuteTemplate(w, "detail.html", detailViewData{Message: message})
+	if err != nil {
+		s.logger.Error("failed to render page", "error", err)
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
 	}
 }
@@ -131,8 +139,10 @@ func (s *WebServer) handleRaw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if execErr := s.templates.ExecuteTemplate(w, "raw.html", detailViewData{Message: message}); execErr != nil {
-		s.logger.Error("failed to render page", "error", execErr)
+
+	err = s.templates.ExecuteTemplate(w, "raw.html", detailViewData{Message: message})
+	if err != nil {
+		s.logger.Error("failed to render page", "error", err)
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
 	}
 }
@@ -175,6 +185,7 @@ func (s *WebServer) handleAPIGetMessage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "failed to load message", http.StatusInternalServerError)
 		return
 	}
+
 	if !found {
 		http.NotFound(w, r)
 		return

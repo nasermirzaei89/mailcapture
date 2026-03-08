@@ -452,6 +452,142 @@ func TestSessionSTARTTLSUpgradeRequiresNewEHLO(t *testing.T) {
 	}
 }
 
+func TestSessionSTARTTLSWithoutConfig(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), DefaultSMTPConfig())
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	writeLine(t, w, "STARTTLS")
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "502") {
+		t.Fatalf("expected 502 when STARTTLS is disabled, got %q", resp)
+	}
+}
+
+func TestSessionSTARTTLSRequiresGreeting(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.TLSConfig = newTestTLSConfig(t)
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "STARTTLS")
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "503") {
+		t.Fatalf("expected 503 before EHLO/HELO for STARTTLS, got %q", resp)
+	}
+}
+
+func TestSessionAUTHUnsupportedMechanism(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	writeLine(t, w, "AUTH CRAM-MD5")
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "501") {
+		t.Fatalf("expected 501 for unsupported AUTH mechanism, got %q", resp)
+	}
+}
+
+func TestSessionAUTHInvalidCredentials(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00user\x00wrong"))
+	writeLine(t, w, "AUTH PLAIN "+authPayload)
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "535") {
+		t.Fatalf("expected 535 for invalid AUTH credentials, got %q", resp)
+	}
+}
+
+func TestSessionAUTHAlreadyAuthenticated(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.AuthUsername = "user"
+	cfg.AuthPassword = "pass"
+	cfg.AllowInsecureAuth = true
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "EHLO localhost")
+	_ = readMultilineResponse(t, r, "250")
+
+	authPayload := base64.StdEncoding.EncodeToString([]byte("\x00user\x00pass"))
+	writeLine(t, w, "AUTH PLAIN "+authPayload)
+	readHasCode(t, r, "235")
+
+	writeLine(t, w, "AUTH PLAIN "+authPayload)
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "503") {
+		t.Fatalf("expected 503 when AUTH repeated after success, got %q", resp)
+	}
+}
+
 func readHasCode(t *testing.T, r *bufio.Reader, code string) {
 	t.Helper()
 

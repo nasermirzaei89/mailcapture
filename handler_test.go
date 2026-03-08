@@ -157,3 +157,60 @@ func TestHealthz(t *testing.T) {
 		t.Fatalf("body mismatch: got %q want %q", body, "ok")
 	}
 }
+
+func TestAPIMethodNotAllowed(t *testing.T) {
+	t.Parallel()
+
+	repo := NewInMemoryMessageRepository()
+	s, err := NewWebServer(":0", repo, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("new server failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", nil)
+	rr := httptest.NewRecorder()
+	s.httpServer.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status mismatch: got %d want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+	allow := rr.Header().Get("Allow")
+	if !strings.Contains(allow, http.MethodGet) || !strings.Contains(allow, http.MethodDelete) {
+		t.Fatalf("allow header mismatch: got %q", allow)
+	}
+}
+
+func TestAPINotFoundRoutes(t *testing.T) {
+	t.Parallel()
+
+	repo := NewInMemoryMessageRepository()
+	s, err := NewWebServer(":0", repo, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("new server failed: %v", err)
+	}
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/messages/missing"},
+		{method: http.MethodDelete, path: "/api/messages/missing"},
+		{method: http.MethodGet, path: "/messages/missing"},
+		{method: http.MethodGet, path: "/messages/missing/raw"},
+		{method: http.MethodGet, path: "/does-not-exist"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rr := httptest.NewRecorder()
+			s.httpServer.Handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("status mismatch for %s %s: got %d want %d", tc.method, tc.path, rr.Code, http.StatusNotFound)
+			}
+		})
+	}
+}
