@@ -16,7 +16,7 @@ func TestSessionAcceptsMessageAndStoresIt(t *testing.T) {
 	defer client.Close()
 
 	repo := NewInMemoryMessageRepository()
-	s := newSession(server, repo, slog.New(slog.DiscardHandler))
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), DefaultSMTPConfig())
 	go s.run(context.Background())
 
 	r := bufio.NewReader(client)
@@ -71,7 +71,7 @@ func TestSessionRejectsDataBeforeMailAndRcpt(t *testing.T) {
 	defer client.Close()
 
 	repo := NewInMemoryMessageRepository()
-	s := newSession(server, repo, slog.New(slog.DiscardHandler))
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), DefaultSMTPConfig())
 	go s.run(context.Background())
 
 	r := bufio.NewReader(client)
@@ -86,6 +86,85 @@ func TestSessionRejectsDataBeforeMailAndRcpt(t *testing.T) {
 	resp := readLine(t, r)
 	if !strings.HasPrefix(resp, "503") {
 		t.Fatalf("expected 503 for DATA before MAIL/RCPT, got %q", resp)
+	}
+}
+
+func TestSessionRejectsTooManyRecipients(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.MaxRecipients = 1
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "HELO localhost")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "MAIL FROM:<from@example.com>")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "RCPT TO:<to1@example.com>")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "RCPT TO:<to2@example.com>")
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "452") {
+		t.Fatalf("expected 452 for second RCPT, got %q", resp)
+	}
+}
+
+func TestSessionRejectsOversizedData(t *testing.T) {
+	t.Parallel()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	repo := NewInMemoryMessageRepository()
+	cfg := DefaultSMTPConfig()
+	cfg.MaxMessageBytes = 48
+	s := newSession(server, repo, slog.New(slog.DiscardHandler), cfg)
+	go s.run(context.Background())
+
+	r := bufio.NewReader(client)
+	w := bufio.NewWriter(client)
+
+	readHasCode(t, r, "220")
+	writeLine(t, w, "HELO localhost")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "MAIL FROM:<from@example.com>")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "RCPT TO:<to@example.com>")
+	readHasCode(t, r, "250")
+
+	writeLine(t, w, "DATA")
+	readHasCode(t, r, "354")
+
+	writeRaw(t, w, "Subject: Too Large\r\n")
+	writeRaw(t, w, "\r\n")
+	writeRaw(t, w, "0123456789012345678901234567890123456789\r\n")
+	writeRaw(t, w, ".\r\n")
+
+	resp := readLine(t, r)
+	if !strings.HasPrefix(resp, "552") {
+		t.Fatalf("expected 552 for oversized DATA, got %q", resp)
+	}
+
+	count, err := repo.Count(context.Background())
+	if err != nil {
+		t.Fatalf("count failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 stored messages after oversized DATA, got %d", count)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,27 +12,33 @@ import (
 	"strings"
 )
 
+var errMessageTooLarge = errors.New("message too large")
+
 type session struct {
-	conn        net.Conn
-	repo        MessageRepository
-	logger      *slog.Logger
-	reader      *bufio.Reader
-	writer      *bufio.Writer
-	remote      string
-	greeted     bool
-	hasMailFrom bool
-	mailFrom    string
-	rcptTo      []string
+	conn            net.Conn
+	repo            MessageRepository
+	logger          *slog.Logger
+	reader          *bufio.Reader
+	writer          *bufio.Writer
+	remote          string
+	greeted         bool
+	hasMailFrom     bool
+	mailFrom        string
+	rcptTo          []string
+	maxMessageBytes int
+	maxRecipients   int
 }
 
-func newSession(conn net.Conn, repo MessageRepository, logger *slog.Logger) *session {
+func newSession(conn net.Conn, repo MessageRepository, logger *slog.Logger, config SMTPConfig) *session {
 	return &session{
-		conn:   conn,
-		repo:   repo,
-		logger: logger,
-		reader: bufio.NewReader(conn),
-		writer: bufio.NewWriter(conn),
-		remote: conn.RemoteAddr().String(),
+		conn:            conn,
+		repo:            repo,
+		logger:          logger,
+		reader:          bufio.NewReader(conn),
+		writer:          bufio.NewWriter(conn),
+		remote:          conn.RemoteAddr().String(),
+		maxMessageBytes: config.MaxMessageBytes,
+		maxRecipients:   config.MaxRecipients,
 	}
 }
 
@@ -142,6 +149,15 @@ func (s *session) run(ctx context.Context) {
 				continue
 			}
 
+			if s.maxRecipients > 0 && len(s.rcptTo) >= s.maxRecipients {
+				err := s.writeResponse(452, "too many recipients")
+				if err != nil {
+					return
+				}
+
+				continue
+			}
+
 			s.rcptTo = append(s.rcptTo, to)
 
 			err := s.writeResponse(250, "ok")
@@ -163,6 +179,16 @@ func (s *session) run(ctx context.Context) {
 			}
 			raw, dataErr := s.readData()
 			if dataErr != nil {
+				if errors.Is(dataErr, errMessageTooLarge) {
+					s.resetTransaction()
+					err := s.writeResponse(552, "message size exceeds fixed maximum message size")
+					if err != nil {
+						return
+					}
+
+					continue
+				}
+
 				err := s.writeResponse(451, "failed to read DATA")
 				if err != nil {
 					return
@@ -219,6 +245,7 @@ func (s *session) readLine() (string, error) {
 
 func (s *session) readData() ([]byte, error) {
 	var buf bytes.Buffer
+	overLimit := false
 	for {
 		line, err := s.reader.ReadString('\n')
 		if err != nil {
@@ -233,6 +260,18 @@ func (s *session) readData() ([]byte, error) {
 			trimmed = trimmed[1:]
 		}
 
+		if s.maxMessageBytes > 0 {
+			nextLen := buf.Len() + len(trimmed) + 2
+			if nextLen > s.maxMessageBytes {
+				overLimit = true
+				continue
+			}
+		}
+
+		if overLimit {
+			continue
+		}
+
 		_, err = buf.WriteString(trimmed)
 		if err != nil {
 			return nil, err
@@ -242,6 +281,10 @@ func (s *session) readData() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if overLimit {
+		return nil, errMessageTooLarge
 	}
 
 	return buf.Bytes(), nil

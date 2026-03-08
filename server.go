@@ -15,13 +15,37 @@ type SMTPServer struct {
 	addr   string
 	repo   MessageRepository
 	logger *slog.Logger
+	config SMTPConfig
 
 	listener net.Listener
 	wg       sync.WaitGroup
 }
 
+type SMTPConfig struct {
+	MaxMessageBytes int
+	MaxRecipients   int
+}
+
+func DefaultSMTPConfig() SMTPConfig {
+	return SMTPConfig{
+		MaxMessageBytes: 10 * 1024 * 1024,
+		MaxRecipients:   100,
+	}
+}
+
 func NewSMTPServer(addr string, repo MessageRepository, logger *slog.Logger) *SMTPServer {
-	return &SMTPServer{addr: addr, repo: repo, logger: logger}
+	return NewSMTPServerWithConfig(addr, repo, logger, DefaultSMTPConfig())
+}
+
+func NewSMTPServerWithConfig(addr string, repo MessageRepository, logger *slog.Logger, config SMTPConfig) *SMTPServer {
+	if config.MaxRecipients < 0 {
+		config.MaxRecipients = 0
+	}
+	if config.MaxMessageBytes < 0 {
+		config.MaxMessageBytes = 0
+	}
+
+	return &SMTPServer{addr: addr, repo: repo, logger: logger, config: config}
 }
 
 func (s *SMTPServer) Start() error {
@@ -85,7 +109,7 @@ func (s *SMTPServer) acceptLoop() {
 		go func(c net.Conn) {
 			defer s.wg.Done()
 			_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
-			sess := newSession(c, s.repo, s.logger)
+			sess := newSession(c, s.repo, s.logger, s.config)
 			sess.run(context.Background())
 		}(conn)
 	}

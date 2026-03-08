@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -33,6 +33,11 @@ type detailViewData struct {
 	Message Message
 }
 
+type apiListMessagesResponse struct {
+	Count    int       `json:"count"`
+	Messages []Message `json:"messages"`
+}
+
 func NewWebServer(addr string, repo MessageRepository, logger *slog.Logger) (*WebServer, error) {
 	tpls, err := template.ParseFS(assets, "templates/*.html")
 	if err != nil {
@@ -47,8 +52,14 @@ func NewWebServer(addr string, repo MessageRepository, logger *slog.Logger) (*We
 	s := &WebServer{repo: repo, logger: logger, templates: tpls}
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
-	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/messages/", s.handleMessageRoute)
+	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /messages/{id}", s.handleDetail)
+	mux.HandleFunc("GET /messages/{id}/raw", s.handleRaw)
+	mux.HandleFunc("GET /api/messages", s.handleAPIListMessages)
+	mux.HandleFunc("DELETE /api/messages", s.handleAPIClearMessages)
+	mux.HandleFunc("GET /api/messages/{id}", s.handleAPIGetMessage)
+	mux.HandleFunc("DELETE /api/messages/{id}", s.handleAPIDeleteMessage)
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
@@ -72,46 +83,22 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 }
 
 func (s *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
 	messages, err := s.repo.List(r.Context())
 	if err != nil {
 		http.Error(w, "failed to load messages", http.StatusInternalServerError)
 		s.logger.Error("failed to load messages", "error", err)
 		return
 	}
-	count, err := s.repo.Count(r.Context())
-	if err != nil {
-		http.Error(w, "failed to count messages", http.StatusInternalServerError)
-		s.logger.Error("failed to count messages", "error", err)
-		return
-	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if execErr := s.templates.ExecuteTemplate(w, "list.html", listViewData{Messages: messages, Count: count}); execErr != nil {
+	if execErr := s.templates.ExecuteTemplate(w, "list.html", listViewData{Messages: messages, Count: len(messages)}); execErr != nil {
 		s.logger.Error("failed to render page", "error", execErr)
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
 	}
 }
 
-func (s *WebServer) handleMessageRoute(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/messages/")
-	if path == "" {
-		http.NotFound(w, r)
-		return
-	}
-	if before, ok := strings.CutSuffix(path, "/raw"); ok {
-		id := before
-		id = strings.TrimSuffix(id, "/")
-		s.handleRaw(w, r, id)
-		return
-	}
-	s.handleDetail(w, r, strings.TrimSuffix(path, "/"))
-}
-
-func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request, id string) {
+func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	message, found, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
 		s.logger.Error("failed to load message", "error", err)
@@ -130,7 +117,8 @@ func (s *WebServer) handleDetail(w http.ResponseWriter, r *http.Request, id stri
 	}
 }
 
-func (s *WebServer) handleRaw(w http.ResponseWriter, r *http.Request, id string) {
+func (s *WebServer) handleRaw(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	message, found, err := s.repo.GetByID(r.Context(), id)
 	if err != nil {
 		s.logger.Error("failed to load message", "error", err)
@@ -146,5 +134,76 @@ func (s *WebServer) handleRaw(w http.ResponseWriter, r *http.Request, id string)
 	if execErr := s.templates.ExecuteTemplate(w, "raw.html", detailViewData{Message: message}); execErr != nil {
 		s.logger.Error("failed to render page", "error", execErr)
 		http.Error(w, "failed to render page", http.StatusInternalServerError)
+	}
+}
+
+func (s *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *WebServer) handleAPIListMessages(w http.ResponseWriter, r *http.Request) {
+	messages, err := s.repo.List(r.Context())
+	if err != nil {
+		s.logger.Error("failed to list messages", "error", err)
+		http.Error(w, "failed to list messages", http.StatusInternalServerError)
+		return
+	}
+
+	response := apiListMessagesResponse{Count: len(messages), Messages: messages}
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+func (s *WebServer) handleAPIClearMessages(w http.ResponseWriter, r *http.Request) {
+	err := s.repo.DeleteAll(r.Context())
+	if err != nil {
+		s.logger.Error("failed to clear messages", "error", err)
+		http.Error(w, "failed to clear messages", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *WebServer) handleAPIGetMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	message, found, err := s.repo.GetByID(r.Context(), id)
+	if err != nil {
+		s.logger.Error("failed to load message", "id", id, "error", err)
+		http.Error(w, "failed to load message", http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, message)
+}
+
+func (s *WebServer) handleAPIDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	deleted, err := s.repo.DeleteByID(r.Context(), id)
+	if err != nil {
+		s.logger.Error("failed to delete message", "id", id, "error", err)
+		http.Error(w, "failed to delete message", http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *WebServer) writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		s.logger.Error("failed to write json response", "error", err)
 	}
 }

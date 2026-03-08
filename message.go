@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -29,4 +30,14 @@ func NewMessageID() (string, error) {
 	}
 
 	return hex.EncodeToString(b[:]), nil
+}
+
+// MessageRepository defines storage operations for received messages.
+type MessageRepository interface {
+	Create(ctx context.Context, message Message) (Message, error)
+	GetByID(ctx context.Context, id string) (Message, bool, error)
+	List(ctx context.Context) ([]Message, error)
+	Count(ctx context.Context) (int, error)
+	DeleteByID(ctx context.Context, id string) (bool, error)
+	DeleteAll(ctx context.Context) error
 }

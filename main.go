@@ -24,15 +24,24 @@ func main() {
 func run() error {
 	var smtpAddr string
 	var httpAddr string
+	var maxMessageBytes int
+	var maxRecipients int
+	var maxMessages int
 
 	flag.StringVar(&smtpAddr, "smtp-addr", ":1025", "SMTP listen address")
 	flag.StringVar(&httpAddr, "http-addr", ":8080", "HTTP listen address")
+	flag.IntVar(&maxMessageBytes, "max-message-bytes", 10*1024*1024, "Maximum accepted SMTP DATA size in bytes (0 disables limit)")
+	flag.IntVar(&maxRecipients, "max-recipients", 100, "Maximum RCPT TO recipients per message (0 disables limit)")
+	flag.IntVar(&maxMessages, "max-messages", 1000, "Maximum retained messages in memory (0 disables limit)")
 	flag.Parse()
 
 	logger := slog.Default()
 
-	repo := NewInMemoryMessageRepository()
-	smtpServer := NewSMTPServer(smtpAddr, repo, logger)
+	repo := NewInMemoryMessageRepositoryWithLimit(maxMessages)
+	smtpServer := NewSMTPServerWithConfig(smtpAddr, repo, logger, SMTPConfig{
+		MaxMessageBytes: maxMessageBytes,
+		MaxRecipients:   maxRecipients,
+	})
 	webServer, err := NewWebServer(httpAddr, repo, logger)
 	if err != nil {
 		return fmt.Errorf("setup http server: %w", err)
